@@ -8,6 +8,7 @@ port_b       EQU 0x4001  ;82c55B  : porta B
 port_c       EQU 0x4002  ;82c55C  : porta C
 port_abc_pgm EQU 0x4003  ;82c55pgm  : registro de programação
 esc          EQU 0x003E  ;Checagem da tecla ESC do paulmon2
+Upper    EQU 0x0040          ;Converter Acc para caixa alta
 cout     EQU 0x0030          ;Imprime o acumulador na porta serial
 pint8u   EQU 0x004D          ;Imprime Acc em um inteiro de 0 ate 255
 ; cabeçalho: todo programa deve ter um, para o PAULMON2 poder gerenciar
@@ -26,6 +27,8 @@ sjmp begin
 dphc EQU 7Fh               ;guarda copia do dptr para a pstri
 dplc EQU 7Eh               ;
 pot  EQU 7Dh               ;guarda a entrada do usuario
+dir  EQU 7Ch               ;guarda a direção do acionamento
+fase EQU 7Bh               ;guarda a fase do input do usuário
 ;NOSSAS SUBROTINAS -----------------------------------------------------------------------------
 cinn:                      ;olha para a serial, se houver caracter trata, senão retorna
   jnb   ri,saicinn         ;se não há caracter na serial sai
@@ -67,44 +70,51 @@ begin:
   acall pstri DB "Digite o valor da velocidade (0-99): ",0 
 ;------------------ SUBROTINA PARA ENTRADA DE DOIS DIGITOS SEM EDIÇÃO ------------------------------------------
 inicio0:
-  mov   pot,#0               ;inicializa o buffer da potencia
+  mov   pot,#-1              ;inicializa o buffer da potencia
+  mov   fase,#1              ;fase 1 -> aguardando o primeiro digito da potencia
 inicio:
-  mov   a,pot                ;pega o valor da potencia
-  cjne  a,#0,digito2         ;vai para o digito 2 se existir o primeiro digito
+  mov   a,fase               ;pega o valor da fase
+  cjne  a,#1,t2              ;vai testar a fase 2
 digito1:  
   clr   a                    ;zera o acumulador
   acall cinn                 ;captura a resposta do usuario, se houver
-  jz    aciona               ;se o usuario nao digitou nada vai para o acionamento do motor
+  jz    aciona1              ;se o usuario nao digitou nada vai para o acionamento do motor
   cjne  a,#'0',teste1        ;liga o carry se a<'0'
 teste1:
   jc    testaESC             ;vai testar a tecla ESC
   cjne  a,#'9'+1,teste2      ;liga o carry se a<='9'
 teste2:  
-  jnc   aciona               ;salta se a entrada do usuario é invalida
+  jnc   aciona1              ;salta se a entrada do usuario é invalida
   lcall cout                 ;valida o primeiro digito do usuario
   anl   a,#00001111b         ;converte para valor
   mov   pot,a                ;guarda o digito da velocidade
+  mov   fase,#2              ;muda para a fase 2
   sjmp  digito2              ;vai tratar o segundo digito
 testaESC:
-  cjne  a,#27,aciona        ;se for inválido vai para o acionamento
+  cjne  a,#27,aciona1       ;se for inválido vai para o acionamento
   mov   a,#00000000b        ;configuração que desliga as bobinas
   mov   dptr,#port_b        ;aponta para as bobinas
   movx  @dptr,a             ;desliga as bobinas
   cpl   a                   ;inverte a configuração 
   mov   dptr,#port_c        ;dptr -> porta c
   movx  @dptr,a             ;desliga as bobinas
+  acall pstri DB "Fim da Execucao",0
   ret                       ;retorna ao PAULMON2
+t2:
+  cjne  a,#2,t3             ;testa se é fase 2
 digito2:
   clr   a                    ;zera o acumulador
   acall cinn                 ;aguarda o segundo digito
-  jz    aciona               ;salta se o usuario nao digitou o segundo algarismo
+  jz    aciona1              ;salta se o usuario nao digitou o segundo algarismo
   cjne  a,#'0',teste3        ;liga o carry se o a<'0'
 teste3:
   jc    testaENTER           ;vai testar a tecla ENTER
   cjne  a,#'9'+1,teste4      ;liga o carry se a<='9'
 teste4:  
-  jnc   aciona               ;salta se a entrada do usuario é invalida
+  jnc   aciona1              ;salta se a entrada do usuario é invalida
   sjmp  valido
+aciona1:
+  sjmp  aciona2             ;ponte para o aciona
 testaENTER:
   cjne  a,#13,testaESC2     ;se não for ENTER, vai testar ESC
   sjmp  direcao             ;vai pedir a direção
@@ -128,25 +138,54 @@ valido:               ;segundo dígito válido
   add   a,b                  ;compoe a velocidade com 2 algarismos
   mov   pot,a                ;guarda a nova velocidade em pot
 ;------------------- FIM DA SUBROTINA DE ENTRADA DE DOIS DIGITOS ----------------------------------------------
+  mov   fase,#3              ;muda para a fase 3
 direcao:
-  mov   a,pot
-  lcall pint8u         ;imprime velocidade 
-  acall pstri DB 10,13,0
-  sjmp  inicio0
-  ret
-  
-  
-  
-aciona:
-   
-  sjmp  inicio
+  mov   dir,#' '             ;inicialização
+  acall pstri DB 10,13,0     ;pula uma linha
+  acall pstri DB "Escolha a direcao do acionamento (D/E): ",13,10,10,0
+t3:  
+  clr   a                    ;zera o acumulador
+  acall cinn                 ;captura a resposta do acumulador
+  jz    aciona               ;se o usuario não digitou nada vai pra aciona
+  lcall upper                ;converte-o para maiusculo, poe no acumulador 
+  cjne  a,#'D',notD          ;salta se não é 'D'
+  mov   dir,a                ;guarda a direção
+  sjmp  copiabuffer          ;vai acionar
+aciona2:
+  sjmp  aciona               ;ponte para o aciona
+notD:
+  cjne  a,#'E',notE          ;salta se não é 'E'
+  mov   dir,a                ;guarda a direção
+  sjmp  copiabuffer          ;vai acionar
+notE:
+  cjne  a,#27,aciona        ;entrada inválida 
+  mov   a,#00000000b        ;configuração que desliga as bobinas
+  mov   dptr,#port_b        ;aponta para as bobinas
+  movx  @dptr,a             ;desliga as bobinas
+  cpl   a                   ;inverte a configuração 
+  mov   dptr,#port_c        ;dptr -> porta c
+  movx  @dptr,a             ;desliga as bobinas
+  ret                       ;retorna ao PAULMON2
+copiabuffer:
+  mov   a,pot               ;pega a velocidade
+  lcall pint8u              ;imprime velocidade
+  acall pstri DB 10,13,0    ;pula uma linha
+  mov   a,dir               ;pega a direção
+  lcall cout                ;imprime a direção
+; converter pot em delay
+; apontar dptr para a tabela correta   
+  mov   fase,#1             ;volta a fase 1
+aciona:  
+
+
+  ljmp  inicio
   
 
 
 
 
 inicio1:
-  mov   dptr,#table           ;dptr -> início da tabela 
+  mov   dptr,#direita           ;dptr -> início da tabela 
 ntable: 
   mov   b,#4            ;conta linhas tabela
 loop:
@@ -182,16 +221,14 @@ delay3:
   movx   @dptr,a          ;apaga os leds
   ret                     ;retorna ao PAULMON2
 
-table:                    ;tabela do sentiro horário
+direita:                    ;tabela do sentiro horário
     DB 00001000b
     DB 00000100b
     DB 00000010b
     DB 00000001b
-
-;table2:                      ;tabela do sentido anti-horário
-;    DB 00000001b
-;    DB 00000010b
-;    DB 00000100b
-;    DB 00001000b
-    
+esquerda:                      ;tabela do sentido anti-horário
+    DB 00000001b
+    DB 00000010b
+    DB 00000100b
+    DB 00001000b 
 END                          ;Fim
